@@ -1,0 +1,82 @@
+#!/bin/bash
+#PBS -N  CAU11_PDMS_NUMBER
+#PBS -o  zeo.out
+#PBS -j  oe
+#PBS -V
+#PBS -q  dque
+#PBS -l  nodes=1:ppn=1
+#PBS -l  walltime=999:00:00
+
+export OMP_NUM_THREADS=1
+export PATH=$PATH:/opt/intel/composer_xe_2013_sp1.1.106/bin/intel64:/usr/local/maui-3.3.1/bin:/usr/local/openmpi-1.6.5/bin:/usr/local/torque-4.2.2/bin:/opt/Gaussian/GaussView/Gv5/gv:/usr/local/gromacs/bin:/usr/local/gromacs/share/gromacs/top
+
+
+cd $PBS_O_WORKDIR
+
+source  /opt/intel/oneapi/setvars.sh  --force
+conda activate py36
+export PATH=$PATH:/opt/intel/composer_xe_2013_sp1.1.106/bin/intel64:/usr/local/maui-3.3.1/bin:/usr/local/openmpi-1.6.5/bin:/usr/local/torque-4.2.2/bin:/opt/Gaussian/GaussView/Gv5/gv:/usr/local/gromacs/bin:/usr/local/gromacs/share/gromacs/top
+
+
+nframe=NFRAME
+natom=NATOM
+traj_file=TRAJ_FILE
+start=NSTART
+z_threshold=4.1
+z_threshold0=0.0
+z_threshold=$(echo "$z_threshold - $z_threshold0" | bc)
+
+line1=$(head -1 "$traj_file")
+line_N=$(tail -1 "$traj_file"| awk -v z="$z_threshold" '{print $1,  $2,  z}')
+line=$(($natom+2))
+echo "Line I " $line1 
+echo "Line N "  $line_N
+echo "line"  $line
+echo "Z_threshol" $z_threshold
+
+echo "#Total Frames " $nframe >  zeo_psd.log
+echo  " "                     >  zeo_traj.vpsdradii
+echo "Continous pore caluation " $traj_file  "having " $nframe >  zeo_psd.log 
+
+
+
+for ((i=1; i<=$nframe; i++))
+do
+  end=$(($start + 2 + $natom))
+
+  # extract gro
+  sed -n "${start},${end}p" "$traj_file" > config.gro
+  # Translate back
+  gmx_mpi  editconf -f config.gro  -translate 0 0 -$z_threshold0   -o config1.gro
+  mv config1.gro config.gro
+
+  # extract only those atoms that are in the MOF
+  sed -n "3,${line}p" config.gro > config1.gro
+  
+  atom_ext=0
+  atom_ext=$(awk -v z_thresh="$z_threshold"  '{
+  if ($NF < z_thresh) {
+    print > "config2.gro"
+    atom_ext++
+                      }
+                      } END {
+    print atom_ext
+                                             }' config1.gro)
+
+
+  cat <(echo "$line1") <(echo "$atom_ext") config2.gro <(echo "$line_N") > config_ext.gro
+
+  # convert gro to cif
+  python3 $HOME/Exe/gro2cif.py config_ext.gro
+
+  # zeo calculation
+  echo $i >> zeo_psd.log
+  $HOME/Exe/network -ha -vpsd 0.7 0.7  50000 config_ext.cif  2>&1 | tee  zeo_psd.log
+  
+  # zeo compliation
+  echo "Traj # " $i        >>  zeo_traj.psd_histo 
+  cat config_ext.vpsdradii >> zeo_traj.vpsdradii 
+  cat config_ext.psd_histo >> zeo_traj.psd_histo 
+
+  start=$(($end+1))
+done
